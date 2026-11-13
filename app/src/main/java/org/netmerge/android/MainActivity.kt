@@ -38,6 +38,7 @@ class MainActivity : ComponentActivity() {
                 val history by Engine.history.collectAsState()
                 val even by Engine.evenSplit.collectAsState()
                 val split by Engine.split.collectAsState()
+                val flows by Engine.flows.collectAsState()
                 MainScreen(
                     phase = phase,
                     stats = stats,
@@ -47,6 +48,10 @@ class MainActivity : ComponentActivity() {
                     onEvenSplit = { Engine.setEvenSplit(this, it) },
                     split = split,
                     onSplit = { Engine.setSplit(this, it) },
+                    flows = flows,
+                    onMonitor = Engine::setMonitor,
+                    onClearFlows = Engine::clearFlows,
+                    onAddGamePort = { udp, port -> Engine.addGamePort(this, udp, port) },
                 )
             }
         }

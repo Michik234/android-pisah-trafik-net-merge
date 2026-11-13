@@ -35,10 +35,11 @@ func (p tunProxy) DialContext(ctx context.Context, m *M.Metadata) (net.Conn, err
 
 func (p tunProxy) DialUDP(m *M.Metadata) (net.PacketConn, error) {
 	f := engine.Fam4
-	if d := m.DstIP.Unmap(); d.Is6() {
+	d := m.DstIP.Unmap()
+	if d.Is6() {
 		f = engine.Fam6
 	}
-	return p.b.ListenUDPTo(context.Background(), f, int(m.DstPort))
+	return p.b.ListenUDPTo(context.Background(), f, d.String(), int(m.DstPort))
 }
 
 // Tun owns the stack built on the VPN's file descriptor.

@@ -22,6 +22,7 @@ type Balancer struct {
 	FailCooldown   time.Duration
 	v6mode         atomic.Int32
 	split          splitHolder // see split.go
+	flows          flowTable   // see flowlog.go
 }
 
 // V6Mode decides what happens to IPv6 flows entering the TUN.

@@ -250,3 +250,78 @@ func TestSplitState(t *testing.T) {
 		t.Fatalf("got %q want %q", got, want)
 	}
 }
+
+func TestParsePortsPaste(t *testing.T) {
+	// A list copied from a router, as written: label, en dashes, spaces.
+	const pasted = "UDP: 7086–41192, 10010, 10013, 10039, 10096, 10491, 10612, 11455, 12235, 13748, 13894, 13972, 20000–20002"
+	udp, tcp, err := SplitPorts(pasted, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !tcp.Empty() {
+		t.Fatalf("no TCP ports were given: %s", tcp)
+	}
+	for _, p := range []int{7086, 10010, 13972, 20001, 41192, 30000} {
+		if !udp.Has(p) {
+			t.Errorf("%d must be a game port", p)
+		}
+	}
+	for _, p := range []int{7085, 41193, 443, 53} {
+		if udp.Has(p) {
+			t.Errorf("%d must not be a game port", p)
+		}
+	}
+	if got := udp.String(); got != "7086-41192" { // every other port is inside the big range
+		t.Errorf("merged = %q", got)
+	}
+
+	same := map[string]string{
+		"10010,10013, 20000-20002":                "10010,10013,20000-20002",
+		"10010\n10013\n20000 – 20002\n":           "10010,10013,20000-20002",
+		"UDP: 10010, 10013, 20000—20002.":         "10010,10013,20000-20002",
+		"ports: 10013; 10010; 20000 to 20002":     "10010,10013,20000-20002",
+		"20000..20002 , 10013 ,10010,":            "10010,10013,20000-20002",
+		"udp 10010 10013 20000−20002":             "10010,10013,20000-20002",
+		"10010 10013 20000‑20002":                 "10010,10013,20000-20002",
+		"  UDP :  10010 ,10013 , 20000 - 20002  ": "10010,10013,20000-20002",
+		"10013, 10013, 10010, 20000-20002, 20001": "10010,10013,20000-20002",
+	}
+	for in, want := range same {
+		u, _, err := SplitPorts(in, "")
+		if err != nil || u.String() != want {
+			t.Errorf("SplitPorts(%q) = %q, %v; want %q", in, u.String(), err, want)
+		}
+	}
+}
+
+func TestSplitPortsLabels(t *testing.T) {
+	// A whole block pasted into either box goes to the right protocols.
+	block := "UDP: 7000-8000, 3074\nTCP: 5222, 5223"
+	for _, boxes := range [][2]string{{block, ""}, {"", block}, {"UDP: 7000-8000, 3074", "TCP: 5222, 5223"}} {
+		u, c, err := SplitPorts(boxes[0], boxes[1])
+		if err != nil || u.String() != "3074,7000-8000" || c.String() != "5222-5223" {
+			t.Errorf("%q: udp=%s tcp=%s err=%v", boxes, u, c, err)
+		}
+	}
+	// Unlabelled ports belong to the box they were typed in.
+	u, c, _ := SplitPorts("3074", "5222")
+	if u.String() != "3074" || c.String() != "5222" {
+		t.Errorf("udp=%s tcp=%s", u, c)
+	}
+	// Ports after a TCP label inside the UDP box are TCP, and a later UDP label switches back.
+	u, c, _ = SplitPorts("100 TCP: 200 UDP: 300", "")
+	if u.String() != "100,300" || c.String() != "200" {
+		t.Errorf("udp=%s tcp=%s", u, c)
+	}
+	for _, bad := range []string{"UDP: 7000-", "UDP: 99999", "UDP: 8000-7000", "UDP: hello", "UDP: 0"} {
+		if _, _, err := SplitPorts(bad, ""); err == nil {
+			t.Errorf("%q must be an error", bad)
+		}
+	}
+	if u, c, err := SplitPorts("none", "-"); err != nil || !u.Empty() || !c.Empty() {
+		t.Errorf("none must be empty: %v", err)
+	}
+	if u, _, _ := SplitPorts("all", ""); u.Has(443) || !u.Has(27015) {
+		t.Error("all keeps its meaning")
+	}
+}

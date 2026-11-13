@@ -3,6 +3,7 @@ package engine
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"slices"
 	"sort"
 	"strconv"
@@ -25,39 +26,101 @@ type PortSet struct{ r [][2]uint16 }
 // would hurt if they left over mobile data: DNS (53), NTP (123), QUIC/HTTP3 (443) and mDNS (5353).
 const allPorts = "1-52,54-122,124-442,444-5352,5354-65535"
 
-// ParsePorts reads "7000-8000,3074,all". An empty string, "none" or "-" is the empty set.
+var (
+	// Every dash a spreadsheet, a chat or a router's web page can produce, and "~".
+	dashRe = regexp.MustCompile("[\u2010-\u2015\u2212\uFE58\uFE63\uFF0D\u30FC]")
+	// "7000 to 8000", "7000..8000", "7000~8000" and "7000 - 8000" all mean 7000-8000.
+	rangeWordRe  = regexp.MustCompile(`(\d)\s*(?:to|\.\.|~)\s*(\d)`)
+	spacedDashRe = regexp.MustCompile(`(\d)\s*-\s*(\d)`)
+	labelRe      = regexp.MustCompile(`\b(udp|tcp)\b\s*[:：]?`)
+	noiseRe      = regexp.MustCompile(`\bports?\b\s*[:：]?`)
+	sepRe        = regexp.MustCompile(`[,;，；\s]+`)
+)
+
+// ParsePorts reads a port list the way people write one, so a list copied from a router, a
+// spreadsheet or a chat can be pasted as it is: "7000-8000,3074", "UDP: 7086–41192, 10010, 10013",
+// one port per line, "7000 to 8000", with or without spaces, en dashes or a trailing full stop.
+// "UDP:" and "TCP:" labels are accepted and ignored here (see SplitPorts). An empty string, "none"
+// or "-" is the empty set, "all" every port except 53, 123, 443 and 5353.
 func ParsePorts(s string) (PortSet, error) {
-	var set PortSet
-	s = strings.TrimSpace(strings.ToLower(s))
-	if s == "" || s == "none" || s == "-" {
-		return set, nil
+	secs, err := parseLabeledPorts(s, "")
+	if err != nil {
+		return PortSet{}, err
 	}
-	if s == "all" {
-		s = allPorts
+	var all PortSet
+	for _, p := range secs {
+		all.r = append(all.r, p.r...)
 	}
-	for _, part := range strings.Split(s, ",") {
-		part = strings.TrimSpace(part)
-		if part == "" {
+	all.normalize()
+	return all, nil
+}
+
+// SplitPorts reads what the user typed in the UDP and TCP boxes. Ports without a label belong to
+// the box they were typed in; a "UDP:" or "TCP:" label moves the ports after it to that protocol
+// wherever they were pasted, so a whole "UDP: ... TCP: ..." block can go into either box.
+func SplitPorts(udpText, tcpText string) (udp, tcp PortSet, err error) {
+	a, err := parseLabeledPorts(udpText, "udp")
+	if err != nil {
+		return PortSet{}, PortSet{}, fmt.Errorf("UDP ports: %w", err)
+	}
+	b, err := parseLabeledPorts(tcpText, "tcp")
+	if err != nil {
+		return PortSet{}, PortSet{}, fmt.Errorf("TCP ports: %w", err)
+	}
+	for _, m := range []map[string]PortSet{a, b} {
+		udp.r = append(udp.r, m["udp"].r...)
+		tcp.r = append(tcp.r, m["tcp"].r...)
+	}
+	udp.normalize()
+	tcp.normalize()
+	return udp, tcp, nil
+}
+
+func parseLabeledPorts(s, def string) (map[string]PortSet, error) {
+	out := map[string]PortSet{}
+	s = strings.ToLower(strings.ReplaceAll(s, "\u00a0", " "))
+	s = dashRe.ReplaceAllString(s, "-")
+	s = rangeWordRe.ReplaceAllString(s, "$1-$2")
+	s = spacedDashRe.ReplaceAllString(s, "$1-$2")
+	s = noiseRe.ReplaceAllString(s, " ")
+	s = labelRe.ReplaceAllString(s, " <$1> ")
+	section := def
+	for _, tok := range sepRe.Split(s, -1) {
+		tok = strings.Trim(tok, ".")
+		switch tok {
+		case "", "none", "-":
 			continue
+		case "<udp>":
+			section = "udp"
+			continue
+		case "<tcp>":
+			section = "tcp"
+			continue
+		case "all":
+			tok = allPorts
 		}
-		lo, hi, isRange := strings.Cut(part, "-")
-		a, err := parsePort(lo)
-		if err != nil {
-			return PortSet{}, fmt.Errorf("port %q: %w", part, err)
-		}
-		b := a
-		if isRange {
-			if b, err = parsePort(hi); err != nil {
-				return PortSet{}, fmt.Errorf("port %q: %w", part, err)
+		set := out[section]
+		for _, part := range strings.Split(tok, ",") {
+			lo, hi, isRange := strings.Cut(part, "-")
+			a, err := parsePort(lo)
+			if err != nil {
+				return nil, fmt.Errorf("%q: %w", part, err)
 			}
+			b := a
+			if isRange {
+				if b, err = parsePort(hi); err != nil {
+					return nil, fmt.Errorf("%q: %w", part, err)
+				}
+			}
+			if b < a {
+				return nil, fmt.Errorf("%q: the range runs backwards", part)
+			}
+			set.r = append(set.r, [2]uint16{a, b})
 		}
-		if b < a {
-			return PortSet{}, fmt.Errorf("port range %q runs backwards", part)
-		}
-		set.r = append(set.r, [2]uint16{a, b})
+		set.normalize()
+		out[section] = set
 	}
-	set.normalize()
-	return set, nil
+	return out, nil
 }
 
 func parsePort(s string) (uint16, error) {

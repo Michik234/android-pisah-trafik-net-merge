@@ -18,6 +18,7 @@ import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -42,6 +43,7 @@ import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -59,6 +61,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import org.netmerge.android.Engine
+import org.netmerge.android.FlowRow
 import org.netmerge.android.R
 import org.netmerge.android.Stats
 
@@ -73,6 +76,12 @@ fun MainScreen(
     split: Engine.SplitSettings,
     /** Applies split mode; returns an error message for the user, or null on success. */
     onSplit: (Engine.SplitSettings) -> String?,
+    flows: List<FlowRow>,
+    /** Tells the engine whether the connection monitor is on screen. */
+    onMonitor: (Boolean) -> Unit,
+    onClearFlows: () -> Unit,
+    /** Adds a port to the game ports (true = UDP); returns an error message or null. */
+    onAddGamePort: (Boolean, Int) -> String?,
 ) {
     val p = LocalPalette.current
     Box(
@@ -106,6 +115,7 @@ fun MainScreen(
                     }
                     if (stats.isEmpty()) WaitingCard()
                     ChartCard(stats, history)
+                    FlowsCard(flows, onMonitor, onClearFlows, onAddGamePort)
                 }
             }
             AnimatedVisibility(
@@ -332,6 +342,120 @@ private fun IntroCard() {
     }
 }
 
+/** Ports that are almost never a game: tapping one does not add it. */
+private val notGamePorts = setOf(53, 80, 123, 443, 5353)
+
+/** Live list of connections: which IP and port, over which network, how much data. */
+@Composable
+private fun FlowsCard(
+    flows: List<FlowRow>,
+    onMonitor: (Boolean) -> Unit,
+    onClear: () -> Unit,
+    onAddGamePort: (Boolean, Int) -> String?,
+) {
+    val p = LocalPalette.current
+    var open by remember { mutableStateOf(false) }
+    var filter by remember { mutableStateOf("All") }
+    var activeOnly by remember { mutableStateOf(true) }
+    var note by remember { mutableStateOf<String?>(null) }
+    // The engine only samples the list while this card is open.
+    DisposableEffect(open) {
+        onMonitor(open)
+        onDispose { onMonitor(false) }
+    }
+    val shown = flows.filter { f ->
+        (!activeOnly || f.active) && when (filter) {
+            "UDP" -> f.isUdp
+            "TCP" -> !f.isUdp
+            "Game" -> f.game
+            else -> true
+        }
+    }
+    Card {
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(
+                Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).clickable { open = !open },
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text("Live connections", fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurface)
+                    Text(
+                        if (open) "${shown.size} shown. Tap a row to use its port as a game port."
+                        else "See which IPs and ports are in use and over which network. Good for finding a game's ports.",
+                        color = p.muted, fontSize = 13.sp, lineHeight = 18.sp,
+                    )
+                }
+                Spacer(Modifier.width(12.dp))
+                Text(if (open) "Hide" else "Show", color = p.good, fontWeight = FontWeight.SemiBold)
+            }
+            if (open) {
+                Row(horizontalArrangement = Arrangement.spacedBy(2.dp), verticalAlignment = Alignment.CenterVertically) {
+                    for (name in listOf("All", "UDP", "TCP", "Game")) {
+                        TextButton(onClick = { filter = name }) {
+                            Text(name, fontWeight = if (filter == name) FontWeight.Bold else FontWeight.Normal)
+                        }
+                    }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(2.dp), verticalAlignment = Alignment.CenterVertically) {
+                    TextButton(onClick = { activeOnly = !activeOnly }) {
+                        Text(if (activeOnly) "Active only: on" else "Active only: off")
+                    }
+                    TextButton(onClick = onClear) { Text("Clear finished") }
+                }
+                note?.let { Text(it, color = p.muted, fontSize = 12.sp) }
+                if (shown.isEmpty()) {
+                    Text("No connections yet. Open an app or a game.", color = p.muted, fontSize = 13.sp)
+                }
+                val now = System.currentTimeMillis()
+                for (f in shown.take(60)) {
+                    FlowItem(f, now) {
+                        note = if (f.port in notGamePorts) {
+                            "Port ${f.port} is usually web or DNS traffic, not a game. Not added."
+                        } else {
+                            onAddGamePort(f.isUdp, f.port)
+                                ?: "Port ${f.port} added to the game ${if (f.isUdp) "UDP" else "TCP"} ports. Restart the game."
+                        }
+                    }
+                }
+                if (shown.size > 60) {
+                    Text("Showing the 60 most recent.", color = p.muted, fontSize = 12.sp)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun FlowItem(f: FlowRow, now: Long, onClick: () -> Unit) {
+    val p = LocalPalette.current
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .clickable(onClick = onClick)
+            .padding(vertical = 5.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(f.proto.uppercase(), fontFamily = FontFamily.Monospace, fontSize = 12.sp, fontWeight = FontWeight.Bold, color = p.muted)
+            Spacer(Modifier.width(8.dp))
+            Text(
+                f.address,
+                fontFamily = FontFamily.Monospace,
+                fontSize = 13.sp,
+                color = MaterialTheme.colorScheme.onSurface,
+                modifier = Modifier.weight(1f),
+            )
+            if (f.game) Text("GAME", color = p.good, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+        }
+        val age = if (f.active) "${FlowRow.duration(now - f.startedMs)} · active" else "closed ${FlowRow.duration(now - f.endedMs)} ago"
+        Text(
+            "${f.network} · ↓ ${Stats.size(f.bytesIn.toDouble())} ↑ ${Stats.size(f.bytesOut.toDouble())} · $age",
+            color = colorFor(f.network, p),
+            fontSize = 12.sp,
+        )
+    }
+}
+
 @Composable
 private fun SplitCard(s: Engine.SplitSettings, onChange: (Engine.SplitSettings) -> String?) {
     val p = LocalPalette.current
@@ -360,16 +484,18 @@ private fun SplitCard(s: Engine.SplitSettings, onChange: (Engine.SplitSettings) 
             OutlinedTextField(
                 value = udp,
                 onValueChange = { udp = it },
-                label = { Text("Game UDP ports") },
-                placeholder = { Text("7000-8000,3074") },
-                singleLine = true,
+                label = { Text("Game UDP ports (paste a list)") },
+                placeholder = { Text("UDP: 7086–41192, 10010, 10013, 20000–20002") },
+                minLines = 2,
+                maxLines = 8,
                 modifier = Modifier.fillMaxWidth(),
             )
             OutlinedTextField(
                 value = tcp,
                 onValueChange = { tcp = it },
                 label = { Text("Game TCP ports (optional)") },
-                singleLine = true,
+                minLines = 1,
+                maxLines = 4,
                 modifier = Modifier.fillMaxWidth(),
             )
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -392,7 +518,8 @@ private fun SplitCard(s: Engine.SplitSettings, onChange: (Engine.SplitSettings) 
                 TextButton(onClick = { error = onChange(s.copy(udp = udp, tcp = tcp)) }) { Text("Apply ports") }
                 Spacer(Modifier.width(8.dp))
                 Text(
-                    "Examples: 7000-8000,3074 · all (every port except 53, 123, 443, 5353)",
+                    "Paste a list as it is: commas, spaces, new lines, – ranges and a UDP:/TCP: label all work. " +
+                        "\"all\" = every port except 53, 123, 443, 5353.",
                     color = p.muted, fontSize = 12.sp, lineHeight = 16.sp,
                 )
             }

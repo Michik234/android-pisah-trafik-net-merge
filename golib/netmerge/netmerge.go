@@ -177,17 +177,38 @@ func SetIPv6Mode(mode string) error {
 // udpPorts and tcpPorts are destination ports. With strict, a side never borrows the other one's
 // network when its own is down. Applies to new connections.
 func SetSplit(enabled bool, udpPorts, tcpPorts string, strict bool) error {
-	udp, err := engine.ParsePorts(udpPorts)
+	udp, tcp, err := engine.SplitPorts(udpPorts, tcpPorts)
 	if err != nil {
-		return errors.New("UDP ports: " + err.Error())
-	}
-	tcp, err := engine.ParsePorts(tcpPorts)
-	if err != nil {
-		return errors.New("TCP ports: " + err.Error())
+		return err
 	}
 	bal.SetSplit(engine.SplitConfig{Enabled: enabled, UDP: udp, TCP: tcp, Strict: strict})
 	return nil
 }
+
+// NormalizeSplitPorts reads the port boxes the way SetSplit does and returns what it understood as
+// JSON {"udp": "...", "tcp": "..."}, with ranges merged and sorted ("none" when empty), or the
+// error to show the user. Ports can be pasted as written anywhere: "UDP: 7086–41192, 10010, 10013",
+// one per line, with en dashes, or a whole "UDP: ... TCP: ..." block in either box.
+func NormalizeSplitPorts(udpPorts, tcpPorts string) (string, error) {
+	udp, tcp, err := engine.SplitPorts(udpPorts, tcpPorts)
+	if err != nil {
+		return "", err
+	}
+	b, _ := json.Marshal(map[string]string{"udp": udp.String(), "tcp": tcp.String()})
+	return string(b), nil
+}
+
+// Flows returns the live connection list as JSON: up to limit TCP connections and UDP sessions,
+// open ones first, each with its destination IP and port, the network it uses, whether it is a
+// game flow (split mode), and its byte counts. Only destinations are kept, in memory, never
+// contents, and never written anywhere.
+func Flows(limit int) string {
+	b, _ := json.Marshal(bal.Flows(limit))
+	return string(b)
+}
+
+// ClearFlows forgets the finished connections from the list.
+func ClearFlows() { bal.ClearFlows() }
 
 // SplitState describes split mode in words, for the UI.
 func SplitState() string { return bal.SplitState() }

@@ -17,17 +17,21 @@ type slotConn struct {
 	fam  Family
 	s    *Scheduler
 	once sync.Once
+	b    *Balancer
+	flow *Flow // for the live monitor; may be nil
 }
 
 func (c *slotConn) Read(p []byte) (int, error) {
 	n, err := c.TCPConn.Read(p)
 	c.sl.bytesIn[c.fam].Add(int64(n))
+	c.flow.addIn(n)
 	return n, err
 }
 
 func (c *slotConn) Write(p []byte) (int, error) {
 	n, err := c.TCPConn.Write(p)
 	c.sl.bytesOut[c.fam].Add(int64(n))
+	c.flow.addOut(n)
 	return n, err
 }
 
@@ -41,6 +45,7 @@ func (c *slotConn) CloseWrite() error { c.release(); return c.TCPConn.CloseWrite
 func (c *slotConn) Close() error {
 	c.release()
 	c.sl.conns.Delete(c)
+	c.b.untrack(c.flow)
 	return c.TCPConn.Close()
 }
 
@@ -50,31 +55,41 @@ func (b *Balancer) DialPinned(ctx context.Context, host string, port int) (net.C
 	if err != nil {
 		return nil, err
 	}
-	sc := &slotConn{TCPConn: c.(*net.TCPConn), sl: sl, fam: f, s: b.S}
+	sc := &slotConn{
+		TCPConn: c.(*net.TCPConn), sl: sl, fam: f, s: b.S, b: b,
+		flow: b.track("tcp", host, port, sl.Name, b.isGameFlow(false, port)),
+	}
 	sl.conns.Store(sc, struct{}{})
 	return sc, nil
 }
 
 type slotPacketConn struct {
 	net.PacketConn
-	sl  *Slot
-	fam Family
+	sl   *Slot
+	fam  Family
+	b    *Balancer
+	flow *Flow // for the live monitor; may be nil
 }
 
 func (c *slotPacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
 	n, a, err := c.PacketConn.ReadFrom(p)
 	c.sl.bytesIn[c.fam].Add(int64(n))
+	c.flow.addIn(n)
 	return n, a, err
 }
 
 func (c *slotPacketConn) Close() error {
 	c.sl.conns.Delete(c)
+	if c.b != nil {
+		c.b.untrack(c.flow)
+	}
 	return c.PacketConn.Close()
 }
 
 func (c *slotPacketConn) WriteTo(p []byte, a net.Addr) (int, error) {
 	n, err := c.PacketConn.WriteTo(p, a)
 	c.sl.bytesOut[c.fam].Add(int64(n))
+	c.flow.addOut(n)
 	return n, err
 }
 
@@ -82,15 +97,16 @@ func (c *slotPacketConn) WriteTo(p []byte, a net.Addr) (int, error) {
 // of that flow leaves the same way). UDP flows are short and numerous (DNS), so they don't hold
 // a balancing slot: the pick still spreads them via the scheduler's tie-breaking.
 func (b *Balancer) ListenUDP(ctx context.Context, f Family) (net.PacketConn, error) {
-	return b.listenUDP(ctx, f, nil)
+	return b.listenUDP(ctx, f, nil, "", 0)
 }
 
-// ListenUDPTo is ListenUDP for a flow headed to dstPort: split mode may pick the network by it.
-func (b *Balancer) ListenUDPTo(ctx context.Context, f Family, dstPort int) (net.PacketConn, error) {
-	return b.listenUDP(ctx, f, b.routeFor(true, dstPort))
+// ListenUDPTo is ListenUDP for a flow headed to dstIP:dstPort: split mode may pick the network by
+// the port, and the live monitor lists the flow under that destination.
+func (b *Balancer) ListenUDPTo(ctx context.Context, f Family, dstIP string, dstPort int) (net.PacketConn, error) {
+	return b.listenUDP(ctx, f, b.routeFor(true, dstPort), dstIP, dstPort)
 }
 
-func (b *Balancer) listenUDP(ctx context.Context, f Family, rt *route) (net.PacketConn, error) {
+func (b *Balancer) listenUDP(ctx context.Context, f Family, rt *route, dstIP string, dstPort int) (net.PacketConn, error) {
 	network := "udp4"
 	if f == Fam6 {
 		network = "udp6"
@@ -113,7 +129,10 @@ func (b *Balancer) listenUDP(ctx context.Context, f Family, rt *route) (net.Pack
 			lastErr = err
 			continue
 		}
-		spc := &slotPacketConn{PacketConn: pc, sl: sl, fam: f}
+		spc := &slotPacketConn{PacketConn: pc, sl: sl, fam: f, b: b}
+		if dstPort != 0 {
+			spc.flow = b.track("udp", dstIP, dstPort, sl.Name, b.isGameFlow(true, dstPort))
+		}
 		sl.conns.Store(spc, struct{}{})
 		return spc, nil
 	}
