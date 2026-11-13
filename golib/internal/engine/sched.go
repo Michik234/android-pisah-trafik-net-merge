@@ -54,6 +54,7 @@ type Slot struct {
 	weight          [2]float64
 	base            float64 // Android port: the configured weight, used until speeds are measured
 	present         bool
+	cellular        bool // mobile data; used by split mode
 	state           [2]linkState
 	lastProbe       [2]time.Time
 	downUntil       [2]time.Time
@@ -155,12 +156,13 @@ func (s *Scheduler) Update(nics []nics.Nic) {
 			}
 		}
 		if found == nil {
-			sl := &Slot{Name: n.Name, Index: n.Index, key: n.Name, weight: [2]float64{n.Weight, n.Weight}, base: n.Weight, present: true}
+			sl := &Slot{Name: n.Name, Index: n.Index, key: n.Name, weight: [2]float64{n.Weight, n.Weight}, base: n.Weight, present: true, cellular: n.Cellular}
 			sl.addr.Store(na)
 			s.slots = append(s.slots, sl)
 			continue
 		}
 		found.present = true
+		found.cellular = n.Cellular
 		found.base = n.Weight
 		if !s.auto {
 			found.weight = [2]float64{n.Weight, n.Weight}
@@ -322,11 +324,44 @@ func (s *Scheduler) Release(sl *Slot)                       { s.ReleaseFor(sl, F
 
 // AcquireFor picks a NIC that has an address of the given family.
 func (s *Scheduler) AcquireFor(f Family, skip map[string]struct{}) *Slot {
+	return s.acquire(f, skip, false)
+}
+
+// Names lists the networks that are present and for which match reports true, in order.
+func (s *Scheduler) Names(match func(name string, cellular bool) bool) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []string
+	for _, sl := range s.slots {
+		if sl.present && match(sl.Name, sl.cellular) {
+			out = append(out, sl.Name)
+		}
+	}
+	return out
+}
+
+// Exclude returns the keys of every network for which keep reports false, ready to pass as the
+// skip set of AcquireFor. Split mode uses it to fence a flow into one group of networks.
+func (s *Scheduler) Exclude(keep func(name string, cellular bool) bool) map[string]struct{} {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := map[string]struct{}{}
+	for _, sl := range s.slots {
+		if !keep(sl.Name, sl.cellular) {
+			out[sl.key] = struct{}{}
+		}
+	}
+	return out
+}
+
+// acquire is AcquireFor. With healthyOnly, a network whose probe failed (or that is cooling down
+// after a link error) is not an option at all, instead of being the last resort.
+func (s *Scheduler) acquire(f Family, skip map[string]struct{}, healthyOnly bool) *Slot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.now()
 	// Tiers: 0 = probed up, 1 = not probed yet, 2 = probe failed or link error cooldown.
-	// Only the best non-empty tier is used, so a dead tether gets no flows but, if every NIC
+	// Only the best non-empty tier is used, so a dead network gets no flows but, if every NIC
 	// looks dead, flows still go somewhere rather than nowhere.
 	var tiers [3][]*Slot
 	for _, sl := range s.slots {
@@ -340,6 +375,9 @@ func (s *Scheduler) AcquireFor(f Family, skip map[string]struct{}) *Slot {
 		switch {
 		case now.Before(sl.downUntil[f]) || sl.state[f] == stateDown:
 			t = 2
+			if healthyOnly {
+				continue
+			}
 		case sl.state[f] == stateUp:
 			t = 0
 		}

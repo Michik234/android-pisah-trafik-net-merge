@@ -19,6 +19,9 @@ type Nic struct {
 	IP     net.IP
 	IP6    net.IP
 	Weight float64
+	// Cellular is true for mobile data (the Kotlin side knows the transport). Split mode sends game
+	// flows to cellular networks and everything else to the rest.
+	Cellular bool
 }
 
 var handles sync.Map // int -> uint64 (android.net.Network#getNetworkHandle)

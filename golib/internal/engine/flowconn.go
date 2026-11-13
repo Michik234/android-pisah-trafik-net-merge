@@ -82,6 +82,15 @@ func (c *slotPacketConn) WriteTo(p []byte, a net.Addr) (int, error) {
 // of that flow leaves the same way). UDP flows are short and numerous (DNS), so they don't hold
 // a balancing slot: the pick still spreads them via the scheduler's tie-breaking.
 func (b *Balancer) ListenUDP(ctx context.Context, f Family) (net.PacketConn, error) {
+	return b.listenUDP(ctx, f, nil)
+}
+
+// ListenUDPTo is ListenUDP for a flow headed to dstPort: split mode may pick the network by it.
+func (b *Balancer) ListenUDPTo(ctx context.Context, f Family, dstPort int) (net.PacketConn, error) {
+	return b.listenUDP(ctx, f, b.routeFor(true, dstPort))
+}
+
+func (b *Balancer) listenUDP(ctx context.Context, f Family, rt *route) (net.PacketConn, error) {
 	network := "udp4"
 	if f == Fam6 {
 		network = "udp6"
@@ -89,7 +98,7 @@ func (b *Balancer) ListenUDP(ctx context.Context, f Family) (net.PacketConn, err
 	tried := map[string]struct{}{}
 	lastErr := errors.New("no usable network adapter")
 	for {
-		sl := b.S.AcquireFor(f, tried)
+		sl := b.acquire(f, tried, rt)
 		if sl == nil {
 			return nil, lastErr
 		}

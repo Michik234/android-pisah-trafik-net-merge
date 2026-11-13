@@ -21,6 +21,7 @@ type Balancer struct {
 	ConnectTimeout time.Duration
 	FailCooldown   time.Duration
 	v6mode         atomic.Int32
+	split          splitHolder // see split.go
 }
 
 // V6Mode decides what happens to IPv6 flows entering the TUN.
@@ -138,13 +139,14 @@ func (b *Balancer) DialTCP(ctx context.Context, host string, port int) (net.Conn
 		f, network = Fam6, "tcp6"
 	}
 	tried := map[string]struct{}{}
+	rt := b.routeFor(false, port) // split mode: game ports may be fenced to other networks
 	rep := byte(repFailure)
 	var lastErr error = errors.New("no usable network adapter")
 	if f == Fam6 {
 		rep, lastErr = repNetUnreachable, errors.New("no usable IPv6 adapter")
 	}
 	for {
-		sl := b.S.AcquireFor(f, tried)
+		sl := b.acquire(f, tried, rt)
 		if sl == nil {
 			return nil, nil, f, &dialError{rep: rep, err: lastErr}
 		}

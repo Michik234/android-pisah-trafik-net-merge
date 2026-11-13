@@ -36,11 +36,16 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -65,6 +70,9 @@ fun MainScreen(
     evenSplit: Boolean,
     onToggle: () -> Unit,
     onEvenSplit: (Boolean) -> Unit,
+    split: Engine.SplitSettings,
+    /** Applies split mode; returns an error message for the user, or null on success. */
+    onSplit: (Engine.SplitSettings) -> String?,
 ) {
     val p = LocalPalette.current
     Box(
@@ -107,6 +115,8 @@ fun MainScreen(
             ) {
                 IntroCard()
             }
+            Spacer(Modifier.height(14.dp))
+            SplitCard(split, onSplit)
             Spacer(Modifier.height(14.dp))
             SettingsCard(evenSplit, onEvenSplit)
             Spacer(Modifier.height(18.dp))
@@ -318,6 +328,75 @@ private fun IntroCard() {
                     "Mobile data stays on while merging, so keep an eye on your data plan.",
                 color = p.muted, fontSize = 14.sp, lineHeight = 20.sp,
             )
+        }
+    }
+}
+
+@Composable
+private fun SplitCard(s: Engine.SplitSettings, onChange: (Engine.SplitSettings) -> String?) {
+    val p = LocalPalette.current
+    var udp by remember(s.udp) { mutableStateOf(s.udp) }
+    var tcp by remember(s.tcp) { mutableStateOf(s.tcp) }
+    var error by remember { mutableStateOf<String?>(null) }
+    Card {
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Games on mobile data", fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurface)
+                    Text(
+                        "Connections to the game ports below use mobile data, while everything else " +
+                            "(social media, browser, downloads) stays on Wi-Fi. Both work at the same time. " +
+                            "Restart the game after changing ports.",
+                        color = p.muted, fontSize = 13.sp, lineHeight = 18.sp,
+                    )
+                }
+                Spacer(Modifier.width(12.dp))
+                Switch(
+                    checked = s.enabled,
+                    onCheckedChange = { error = onChange(s.copy(enabled = it, udp = udp, tcp = tcp)) },
+                    colors = SwitchDefaults.colors(checkedTrackColor = p.good),
+                )
+            }
+            OutlinedTextField(
+                value = udp,
+                onValueChange = { udp = it },
+                label = { Text("Game UDP ports") },
+                placeholder = { Text("7000-8000,3074") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            OutlinedTextField(
+                value = tcp,
+                onValueChange = { tcp = it },
+                label = { Text("Game TCP ports (optional)") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Never fall back", fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurface)
+                    Text(
+                        "Off: if mobile data or Wi-Fi drops, the other one carries both. On: Wi-Fi traffic never " +
+                            "uses mobile data, and the game stops when mobile data is down.",
+                        color = p.muted, fontSize = 13.sp, lineHeight = 18.sp,
+                    )
+                }
+                Spacer(Modifier.width(12.dp))
+                Switch(
+                    checked = s.strict,
+                    onCheckedChange = { error = onChange(s.copy(strict = it, udp = udp, tcp = tcp)) },
+                    colors = SwitchDefaults.colors(checkedTrackColor = p.good),
+                )
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                TextButton(onClick = { error = onChange(s.copy(udp = udp, tcp = tcp)) }) { Text("Apply ports") }
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    "Examples: 7000-8000,3074 · all (every port except 53, 123, 443, 5353)",
+                    color = p.muted, fontSize = 12.sp, lineHeight = 16.sp,
+                )
+            }
+            error?.let { Text(it, color = MaterialTheme.colorScheme.error, fontSize = 13.sp) }
         }
     }
 }

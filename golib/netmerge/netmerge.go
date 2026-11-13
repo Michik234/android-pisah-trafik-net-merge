@@ -39,6 +39,8 @@ type network struct {
 	Weight float64 `json:"weight"`
 	// The system's bandwidth estimate (NetworkCapabilities link bandwidth), kbit/s; 0 = unknown.
 	DownKbps float64 `json:"downKbps"`
+	// True for mobile data. Split mode sends game flows over these.
+	Cellular bool `json:"cellular"`
 }
 
 // SetNetworks replaces the set of networks flows may use. It may be called at any time, before
@@ -75,7 +77,7 @@ func SetNetworks(js string) error {
 				w = max(0.1, n.DownKbps/maxDown)
 			}
 		}
-		nic := nics.Nic{Name: n.Name, Index: idx, Weight: w}
+		nic := nics.Nic{Name: n.Name, Index: idx, Weight: w, Cellular: n.Cellular}
 		// Unspecified source addresses: the Network binding chooses the real source.
 		if n.V4 {
 			nic.IP = net.IPv4zero
@@ -168,6 +170,27 @@ func SetIPv6Mode(mode string) error {
 	bal.SetV6Mode(m)
 	return nil
 }
+
+// SetSplit turns split mode on or off and sets its ports. In split mode, connections to the game
+// ports leave over mobile data while everything else uses Wi-Fi, both at the same time. Ports are
+// lists like "7000-8000,3074" ("" or "none" = none, "all" = every port except 53, 123, 443, 5353).
+// udpPorts and tcpPorts are destination ports. With strict, a side never borrows the other one's
+// network when its own is down. Applies to new connections.
+func SetSplit(enabled bool, udpPorts, tcpPorts string, strict bool) error {
+	udp, err := engine.ParsePorts(udpPorts)
+	if err != nil {
+		return errors.New("UDP ports: " + err.Error())
+	}
+	tcp, err := engine.ParsePorts(tcpPorts)
+	if err != nil {
+		return errors.New("TCP ports: " + err.Error())
+	}
+	bal.SetSplit(engine.SplitConfig{Enabled: enabled, UDP: udp, TCP: tcp, Strict: strict})
+	return nil
+}
+
+// SplitState describes split mode in words, for the UI.
+func SplitState() string { return bal.SplitState() }
 
 type stat struct {
 	Name     string  `json:"name"`

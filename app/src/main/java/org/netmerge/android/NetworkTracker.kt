@@ -27,6 +27,8 @@ class NetworkTracker(
         val v6: Boolean,
         /** The system's downstream bandwidth estimate in kbit/s, 0 if unknown. */
         val downKbps: Int,
+        /** Mobile data (as opposed to Wi-Fi); split mode sends game traffic over these. */
+        val cellular: Boolean,
     )
 
     private val cm = context.getSystemService(ConnectivityManager::class.java)
@@ -98,7 +100,10 @@ class NetworkTracker(
             val n = (seen[base] ?: 0) + 1
             seen[base] = n
             val name = if (n == 1) base else "$base $n"
-            Tracked(name, network, hasV4(lp), hasV6(lp), bw[network] ?: 0)
+            Tracked(
+                name, network, hasV4(lp), hasV6(lp), bw[network] ?: 0,
+                cellular = transport == NetworkCapabilities.TRANSPORT_CELLULAR,
+            )
         }.filter { it.v4 || it.v6 }
     }
 

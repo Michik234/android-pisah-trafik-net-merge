@@ -37,6 +37,7 @@ class MainActivity : ComponentActivity() {
                 val stats by Engine.stats.collectAsState()
                 val history by Engine.history.collectAsState()
                 val even by Engine.evenSplit.collectAsState()
+                val split by Engine.split.collectAsState()
                 MainScreen(
                     phase = phase,
                     stats = stats,
@@ -44,6 +45,8 @@ class MainActivity : ComponentActivity() {
                     evenSplit = even,
                     onToggle = ::toggle,
                     onEvenSplit = { Engine.setEvenSplit(this, it) },
+                    split = split,
+                    onSplit = { Engine.setSplit(this, it) },
                 )
             }
         }

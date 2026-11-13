@@ -164,7 +164,8 @@ class MergeVpnService : VpnService() {
                     .put("handle", n.network.networkHandle.toString())
                     .put("v4", n.v4)
                     .put("v6", n.v6)
-                    .put("downKbps", n.downKbps),
+                    .put("downKbps", n.downKbps)
+                    .put("cellular", n.cellular),
             )
         }
         runCatching { netmerge.Netmerge.setNetworks(arr.toString()) }
