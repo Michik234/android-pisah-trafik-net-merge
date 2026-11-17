@@ -30,6 +30,32 @@ object Engine {
     val history: StateFlow<Map<String, List<Float>>> = _history.asStateFlow()
 
     /** The live connection list, refreshed once a second while the monitor is open. */
+    /** Clash-style rules, one per line; see netmerge.Netmerge.setRules. */
+    data class RuleSettings(val enabled: Boolean = false, val text: String = "")
+
+    private val _rules = MutableStateFlow(RuleSettings())
+    val rules: StateFlow<RuleSettings> = _rules.asStateFlow()
+
+    private var resolverSet = false
+
+    /**
+     * Applies and saves the rules. Returns null on success, or a message that names the wrong line
+     * (nothing is changed then).
+     */
+    fun setRules(ctx: Context, r: RuleSettings): String? {
+        val err = runCatching { netmerge.Netmerge.setRules(r.enabled, r.text, _split.value.strict) }.exceptionOrNull()
+        if (err != null) return err.message ?: "Invalid rules"
+        prefs(ctx).edit().putBoolean("rules_on", r.enabled).putString("rules_text", r.text).apply()
+        _rules.value = r
+        return null
+    }
+
+    /** Re-applies the saved rules, e.g. after "Never fall back" changed. */
+    private fun applyRules() {
+        val r = _rules.value
+        runCatching { netmerge.Netmerge.setRules(r.enabled, r.text, _split.value.strict) }
+    }
+
     private val _flows = MutableStateFlow<List<FlowRow>>(emptyList())
     val flows: StateFlow<List<FlowRow>> = _flows.asStateFlow()
 
@@ -39,6 +65,7 @@ object Engine {
     /** The UI says whether the connection monitor is on screen; nothing is sampled when it is not. */
     fun setMonitor(open: Boolean) {
         monitorOpen = open
+        runCatching { netmerge.Netmerge.setMonitorProcesses(open) }
         if (open) refreshFlows() else _flows.value = emptyList()
     }
 
@@ -64,6 +91,12 @@ object Engine {
         val udp: String = "",
         val tcp: String = "",
         val strict: Boolean = false,
+        /** false: the game uses mobile data and the rest Wi-Fi. true: the game uses Wi-Fi and the rest mobile data. */
+        val gameOnWifi: Boolean = false,
+        /** Reject every connection that is not a game connection (like REJECT in Clash). */
+        val blockOthers: Boolean = false,
+        /** While blocking, still let DNS (port 53) through so the game can look up its server. */
+        val allowDns: Boolean = true,
     )
 
     private val _split = MutableStateFlow(SplitSettings())
@@ -99,11 +132,19 @@ object Engine {
     fun loadSettings(ctx: Context) {
         _evenSplit.value = prefs(ctx).getBoolean("even_split", false)
         val p = prefs(ctx)
+        if (!resolverSet) {
+            resolverSet = true
+            runCatching { netmerge.Netmerge.setProcessResolver(AppResolver(ctx.applicationContext)) }
+        }
+        _rules.value = RuleSettings(p.getBoolean("rules_on", false), p.getString("rules_text", "") ?: "")
         _split.value = SplitSettings(
             enabled = p.getBoolean("split_enabled", false),
             udp = p.getString("split_udp", "") ?: "",
             tcp = p.getString("split_tcp", "") ?: "",
             strict = p.getBoolean("split_strict", false),
+            gameOnWifi = p.getBoolean("split_wifi", false),
+            blockOthers = p.getBoolean("split_block", false),
+            allowDns = p.getBoolean("split_dns", true),
         )
         applySettings()
     }
@@ -131,7 +172,9 @@ object Engine {
             return "Enter at least one game port first, for example 7000-8000,3074"
         }
         val err = runCatching {
-            netmerge.Netmerge.setSplit(clean.enabled, clean.udp, clean.tcp, clean.strict)
+            netmerge.Netmerge.setSplit(
+                clean.enabled, clean.udp, clean.tcp, clean.strict, clean.gameOnWifi, clean.blockOthers, clean.allowDns,
+            )
         }.exceptionOrNull()
         if (err != null) return err.message ?: "Invalid ports"
         prefs(ctx).edit()
@@ -139,8 +182,12 @@ object Engine {
             .putString("split_udp", clean.udp)
             .putString("split_tcp", clean.tcp)
             .putBoolean("split_strict", clean.strict)
+            .putBoolean("split_wifi", clean.gameOnWifi)
+            .putBoolean("split_block", clean.blockOthers)
+            .putBoolean("split_dns", clean.allowDns)
             .apply()
         _split.value = clean
+        applyRules() // "Never fall back" also governs the rules
         return null
     }
 
@@ -159,7 +206,10 @@ object Engine {
 
     private fun applySettings() {
         runCatching { netmerge.Netmerge.setAutoWeights(!_evenSplit.value) }
+        applyRules()
         val s = _split.value
-        runCatching { netmerge.Netmerge.setSplit(s.enabled, s.udp, s.tcp, s.strict) }
+        runCatching {
+            netmerge.Netmerge.setSplit(s.enabled, s.udp, s.tcp, s.strict, s.gameOnWifi, s.blockOthers, s.allowDns)
+        }
     }
 }

@@ -76,6 +76,9 @@ fun MainScreen(
     split: Engine.SplitSettings,
     /** Applies split mode; returns an error message for the user, or null on success. */
     onSplit: (Engine.SplitSettings) -> String?,
+    rules: Engine.RuleSettings,
+    /** Applies the rules; returns an error message that names the wrong line, or null. */
+    onRules: (Engine.RuleSettings) -> String?,
     flows: List<FlowRow>,
     /** Tells the engine whether the connection monitor is on screen. */
     onMonitor: (Boolean) -> Unit,
@@ -127,6 +130,8 @@ fun MainScreen(
             }
             Spacer(Modifier.height(14.dp))
             SplitCard(split, onSplit)
+            Spacer(Modifier.height(14.dp))
+            RulesCard(rules, onRules)
             Spacer(Modifier.height(14.dp))
             SettingsCard(evenSplit, onEvenSplit)
             Spacer(Modifier.height(18.dp))
@@ -445,14 +450,71 @@ private fun FlowItem(f: FlowRow, now: Long, onClick: () -> Unit) {
                 color = MaterialTheme.colorScheme.onSurface,
                 modifier = Modifier.weight(1f),
             )
+            if (f.process.isNotEmpty()) {
+                Text(f.process.substringBefore('|'), color = p.muted, fontSize = 11.sp, maxLines = 1)
+                Spacer(Modifier.width(6.dp))
+            }
             if (f.game) Text("GAME", color = p.good, fontSize = 11.sp, fontWeight = FontWeight.Bold)
         }
         val age = if (f.active) "${FlowRow.duration(now - f.startedMs)} · active" else "closed ${FlowRow.duration(now - f.endedMs)} ago"
         Text(
             "${f.network} · ↓ ${Stats.size(f.bytesIn.toDouble())} ↑ ${Stats.size(f.bytesOut.toDouble())} · $age",
-            color = colorFor(f.network, p),
+            color = if (f.network == "Blocked") MaterialTheme.colorScheme.error else colorFor(f.network, p),
             fontSize = 12.sp,
         )
+        if (f.rule.isNotEmpty()) Text(f.rule, color = p.muted, fontSize = 11.sp)
+    }
+}
+
+private const val RULES_EXAMPLE = "AND,((PROCESS-NAME,com.dts.freefireth),(NETWORK,udp)),MOBILE\n" +
+    "AND,((PROCESS-NAME,com.dts.freefireth),(NETWORK,tcp)),WIFI\n" +
+    "PROCESS-NAME,com.example.app,REJECT"
+
+@Composable
+private fun RulesCard(r: Engine.RuleSettings, onChange: (Engine.RuleSettings) -> String?) {
+    val p = LocalPalette.current
+    var text by remember(r.text) { mutableStateOf(r.text) }
+    var error by remember { mutableStateOf<String?>(null) }
+    var applied by remember { mutableStateOf(false) }
+    Card {
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Rules per app", fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurface)
+                    Text(
+                        "Clash-style, one rule per line. Pick MOBILE, WIFI or REJECT (DIRECT = no rule). " +
+                            "The first matching rule wins; a connection that matches none follows the split " +
+                            "settings above. Needs Android 10 or newer to know which app a connection belongs to. " +
+                            "\"Never fall back\" also applies here. Supported: AND, OR, NOT, PROCESS-NAME " +
+                            "(package, * and ? allowed), NETWORK (tcp/udp), DST-PORT, IP-CIDR, MATCH.",
+                        color = p.muted, fontSize = 13.sp, lineHeight = 18.sp,
+                    )
+                }
+                Spacer(Modifier.width(12.dp))
+                Switch(
+                    checked = r.enabled,
+                    onCheckedChange = { applied = false; error = onChange(r.copy(enabled = it, text = text)) },
+                    colors = SwitchDefaults.colors(checkedTrackColor = p.good),
+                )
+            }
+            OutlinedTextField(
+                value = text,
+                onValueChange = { text = it; applied = false },
+                label = { Text("Rules") },
+                placeholder = { Text(RULES_EXAMPLE, fontFamily = FontFamily.Monospace, fontSize = 12.sp) },
+                textStyle = androidx.compose.ui.text.TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp),
+                minLines = 4,
+                maxLines = 14,
+                isError = error != null,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            error?.let { Text(it, color = MaterialTheme.colorScheme.error, fontSize = 13.sp) }
+            if (applied && error == null) Text("Rules applied. Restart the app so its connections are matched.", color = p.good, fontSize = 13.sp)
+            Row {
+                TextButton(onClick = { error = onChange(r.copy(text = text)); applied = error == null }) { Text("Apply rules") }
+                TextButton(onClick = { text = RULES_EXAMPLE }) { Text("Insert example") }
+            }
+        }
     }
 }
 
@@ -466,11 +528,21 @@ private fun SplitCard(s: Engine.SplitSettings, onChange: (Engine.SplitSettings) 
         Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
-                    Text("Games on mobile data", fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurface)
                     Text(
-                        "Connections to the game ports below use mobile data, while everything else " +
-                            "(social media, browser, downloads) stays on Wi-Fi. Both work at the same time. " +
-                            "Restart the game after changing ports.",
+                        if (s.gameOnWifi) "Games on Wi-Fi" else "Games on mobile data",
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    Text(
+                        if (s.gameOnWifi) {
+                            "Connections to the game ports below use Wi-Fi, while everything else " +
+                                "(social media, browser, downloads) uses mobile data, which spends your data plan. " +
+                                "Both work at the same time. Restart the game after changing ports."
+                        } else {
+                            "Connections to the game ports below use mobile data, while everything else " +
+                                "(social media, browser, downloads) stays on Wi-Fi. Both work at the same time. " +
+                                "Restart the game after changing ports."
+                        },
                         color = p.muted, fontSize = 13.sp, lineHeight = 18.sp,
                     )
                 }
@@ -480,6 +552,17 @@ private fun SplitCard(s: Engine.SplitSettings, onChange: (Engine.SplitSettings) 
                     onCheckedChange = { error = onChange(s.copy(enabled = it, udp = udp, tcp = tcp)) },
                     colors = SwitchDefaults.colors(checkedTrackColor = p.good),
                 )
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("Game uses", color = p.muted, fontSize = 13.sp)
+                Spacer(Modifier.width(8.dp))
+                for ((label, wifi) in listOf("Mobile data" to false, "Wi-Fi" to true)) {
+                    TextButton(
+                        onClick = { error = onChange(s.copy(gameOnWifi = wifi, udp = udp, tcp = tcp)) },
+                    ) {
+                        Text(label, fontWeight = if (s.gameOnWifi == wifi) FontWeight.Bold else FontWeight.Normal)
+                    }
+                }
             }
             OutlinedTextField(
                 value = udp,
@@ -502,8 +585,9 @@ private fun SplitCard(s: Engine.SplitSettings, onChange: (Engine.SplitSettings) 
                 Column(Modifier.weight(1f)) {
                     Text("Never fall back", fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurface)
                     Text(
-                        "Off: if mobile data or Wi-Fi drops, the other one carries both. On: Wi-Fi traffic never " +
-                            "uses mobile data, and the game stops when mobile data is down.",
+                        "Off: if the game's network or the other one drops, the remaining one carries both. " +
+                            "On: the two never mix. The game stops when its own network is down, and other " +
+                            "traffic never uses the game's network.",
                         color = p.muted, fontSize = 13.sp, lineHeight = 18.sp,
                     )
                 }
@@ -513,6 +597,44 @@ private fun SplitCard(s: Engine.SplitSettings, onChange: (Engine.SplitSettings) 
                     onCheckedChange = { error = onChange(s.copy(strict = it, udp = udp, tcp = tcp)) },
                     colors = SwitchDefaults.colors(checkedTrackColor = p.good),
                 )
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        "Block everything else",
+                        fontWeight = FontWeight.SemiBold,
+                        color = if (s.blockOthers) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
+                    )
+                    Text(
+                        "Like REJECT in Clash: only the game ports get internet, every other connection is refused. " +
+                            "Browsing and social media stop working until you turn this off.",
+                        color = p.muted, fontSize = 13.sp, lineHeight = 18.sp,
+                    )
+                }
+                Spacer(Modifier.width(12.dp))
+                Switch(
+                    checked = s.blockOthers,
+                    onCheckedChange = { error = onChange(s.copy(blockOthers = it, udp = udp, tcp = tcp)) },
+                    colors = SwitchDefaults.colors(checkedTrackColor = MaterialTheme.colorScheme.error),
+                )
+            }
+            if (s.blockOthers) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Allow DNS", fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurface)
+                        Text(
+                            "Lets name lookups (port 53) through so the game can find its server. " +
+                                "Turn off only if the game connects by IP address.",
+                            color = p.muted, fontSize = 13.sp, lineHeight = 18.sp,
+                        )
+                    }
+                    Spacer(Modifier.width(12.dp))
+                    Switch(
+                        checked = s.allowDns,
+                        onCheckedChange = { error = onChange(s.copy(allowDns = it, udp = udp, tcp = tcp)) },
+                        colors = SwitchDefaults.colors(checkedTrackColor = p.good),
+                    )
+                }
             }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 TextButton(onClick = { error = onChange(s.copy(udp = udp, tcp = tcp)) }) { Text("Apply ports") }

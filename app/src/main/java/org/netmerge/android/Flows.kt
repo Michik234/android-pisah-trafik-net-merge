@@ -17,6 +17,10 @@ data class FlowRow(
     val startedMs: Long,
     val lastMs: Long,
     val endedMs: Long,
+    /** The app that owns the connection, when known (several packages are joined with "|"). */
+    val process: String,
+    /** The rule that decided it, such as "rule 2: MOBILE". */
+    val rule: String,
 ) {
     val isUdp: Boolean get() = proto == "udp"
 
@@ -41,6 +45,8 @@ data class FlowRow(
                     startedMs = o.optLong("started"),
                     lastMs = o.optLong("last"),
                     endedMs = o.optLong("ended"),
+                    process = o.optString("process"),
+                    rule = o.optString("rule"),
                 )
             }
         }

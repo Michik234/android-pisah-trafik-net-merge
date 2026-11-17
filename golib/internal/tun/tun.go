@@ -29,8 +29,17 @@ const udpSessionTimeout = 30 * time.Second
 
 type tunProxy struct{ b *engine.Balancer }
 
+// flowKey describes a new flow for the rules: where it comes from (so the app can be found) and
+// where it goes.
+func flowKey(m *M.Metadata, udp bool) engine.FlowKey {
+	return engine.FlowKey{
+		UDP: udp, SrcIP: m.SrcIP.Unmap().String(), SrcPort: int(m.SrcPort),
+		DstIP: m.DstIP.Unmap().String(), DstPort: int(m.DstPort),
+	}
+}
+
 func (p tunProxy) DialContext(ctx context.Context, m *M.Metadata) (net.Conn, error) {
-	return p.b.DialPinned(ctx, m.DstIP.Unmap().String(), int(m.DstPort))
+	return p.b.DialPinnedFlow(ctx, flowKey(m, false))
 }
 
 func (p tunProxy) DialUDP(m *M.Metadata) (net.PacketConn, error) {
@@ -39,7 +48,7 @@ func (p tunProxy) DialUDP(m *M.Metadata) (net.PacketConn, error) {
 	if d.Is6() {
 		f = engine.Fam6
 	}
-	return p.b.ListenUDPTo(context.Background(), f, d.String(), int(m.DstPort))
+	return p.b.ListenUDPFlow(context.Background(), f, flowKey(m, true))
 }
 
 // Tun owns the stack built on the VPN's file descriptor.

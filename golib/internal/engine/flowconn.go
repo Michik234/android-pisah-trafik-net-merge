@@ -51,13 +51,19 @@ func (c *slotConn) Close() error {
 
 // DialPinned is DialTCP for front-ends that hand the conn to someone else to pump.
 func (b *Balancer) DialPinned(ctx context.Context, host string, port int) (net.Conn, error) {
-	c, sl, f, err := b.DialTCP(ctx, host, port)
+	return b.DialPinnedFlow(ctx, FlowKey{DstIP: host, DstPort: port})
+}
+
+// DialPinnedFlow is DialPinned for a flow whose source is known, so rules can ask which app it is.
+func (b *Balancer) DialPinnedFlow(ctx context.Context, k FlowKey) (net.Conn, error) {
+	fc := b.newCtx(k)
+	c, sl, f, err := b.dialTCP(ctx, k.DstIP, k.DstPort, fc)
 	if err != nil {
 		return nil, err
 	}
 	sc := &slotConn{
 		TCPConn: c.(*net.TCPConn), sl: sl, fam: f, s: b.S, b: b,
-		flow: b.track("tcp", host, port, sl.Name, b.isGameFlow(false, port)),
+		flow: b.track("tcp", k.DstIP, k.DstPort, sl.Name, fc.meta(b.isGameFlow(false, k.DstPort))),
 	}
 	sl.conns.Store(sc, struct{}{})
 	return sc, nil
@@ -97,16 +103,35 @@ func (c *slotPacketConn) WriteTo(p []byte, a net.Addr) (int, error) {
 // of that flow leaves the same way). UDP flows are short and numerous (DNS), so they don't hold
 // a balancing slot: the pick still spreads them via the scheduler's tie-breaking.
 func (b *Balancer) ListenUDP(ctx context.Context, f Family) (net.PacketConn, error) {
-	return b.listenUDP(ctx, f, nil, "", 0)
+	return b.listenUDP(ctx, f, nil)
 }
 
 // ListenUDPTo is ListenUDP for a flow headed to dstIP:dstPort: split mode may pick the network by
 // the port, and the live monitor lists the flow under that destination.
 func (b *Balancer) ListenUDPTo(ctx context.Context, f Family, dstIP string, dstPort int) (net.PacketConn, error) {
-	return b.listenUDP(ctx, f, b.routeFor(true, dstPort), dstIP, dstPort)
+	return b.ListenUDPFlow(ctx, f, FlowKey{UDP: true, DstIP: dstIP, DstPort: dstPort})
 }
 
-func (b *Balancer) listenUDP(ctx context.Context, f Family, rt *route, dstIP string, dstPort int) (net.PacketConn, error) {
+// ListenUDPFlow is ListenUDPTo for a flow whose source is known, so rules can ask which app it is.
+func (b *Balancer) ListenUDPFlow(ctx context.Context, f Family, k FlowKey) (net.PacketConn, error) {
+	k.UDP = true
+	return b.listenUDP(ctx, f, b.newCtx(k))
+}
+
+// listenUDP opens the socket. fc is nil for a flow nothing is known about (no rules, no listing).
+func (b *Balancer) listenUDP(ctx context.Context, f Family, fc *flowCtx) (net.PacketConn, error) {
+	var rt *route
+	var dstIP string
+	var dstPort int
+	if fc != nil {
+		rt, dstIP, dstPort = b.decide(fc), fc.k.DstIP, fc.k.DstPort
+	}
+	if rt != nil && rt.deny {
+		if dstPort != 0 {
+			b.untrack(b.track("udp", dstIP, dstPort, blockedNetwork, fc.meta(false)))
+		}
+		return nil, errBlocked
+	}
 	network := "udp4"
 	if f == Fam6 {
 		network = "udp6"
@@ -131,7 +156,7 @@ func (b *Balancer) listenUDP(ctx context.Context, f Family, rt *route, dstIP str
 		}
 		spc := &slotPacketConn{PacketConn: pc, sl: sl, fam: f, b: b}
 		if dstPort != 0 {
-			spc.flow = b.track("udp", dstIP, dstPort, sl.Name, b.isGameFlow(true, dstPort))
+			spc.flow = b.track("udp", dstIP, dstPort, sl.Name, fc.meta(b.isGameFlow(true, dstPort)))
 		}
 		sl.conns.Store(spc, struct{}{})
 		return spc, nil

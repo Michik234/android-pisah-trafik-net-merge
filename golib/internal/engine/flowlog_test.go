@@ -17,8 +17,8 @@ func newFlowBalancer() *Balancer {
 
 func TestFlowLogTrackAndSnapshot(t *testing.T) {
 	b := newFlowBalancer()
-	a := b.track("tcp", "93.184.216.34", 443, "Wi-Fi", false)
-	g := b.track("udp", "203.0.113.7", 7500, "Mobile data", true)
+	a := b.track("tcp", "93.184.216.34", 443, "Wi-Fi", flowMeta{game: false})
+	g := b.track("udp", "203.0.113.7", 7500, "Mobile data", flowMeta{game: true})
 	a.addIn(1000)
 	a.addOut(200)
 	g.addOut(64)
@@ -47,8 +47,8 @@ func TestFlowLogTrackAndSnapshot(t *testing.T) {
 
 func TestFlowLogCloseMovesToFinished(t *testing.T) {
 	b := newFlowBalancer()
-	a := b.track("tcp", "1.1.1.1", 443, "Wi-Fi", false)
-	c := b.track("tcp", "8.8.8.8", 443, "Wi-Fi", false)
+	a := b.track("tcp", "1.1.1.1", 443, "Wi-Fi", flowMeta{game: false})
+	c := b.track("tcp", "8.8.8.8", 443, "Wi-Fi", flowMeta{game: false})
 	b.untrack(a)
 	b.untrack(a) // twice is harmless
 	got := b.Flows(0)
@@ -68,7 +68,7 @@ func TestFlowLogCloseMovesToFinished(t *testing.T) {
 func TestFlowLogBounds(t *testing.T) {
 	b := newFlowBalancer()
 	for i := 0; i < maxClosedFlows+50; i++ {
-		b.untrack(b.track("udp", "9.9.9.9", 53, "Wi-Fi", false))
+		b.untrack(b.track("udp", "9.9.9.9", 53, "Wi-Fi", flowMeta{game: false}))
 	}
 	if got := b.Flows(0); len(got) != maxClosedFlows {
 		t.Fatalf("finished flows must be capped at %d, got %d", maxClosedFlows, len(got))
@@ -79,9 +79,9 @@ func TestFlowLogBounds(t *testing.T) {
 	// a full table stops listing new flows but must not fail or crash
 	b2 := newFlowBalancer()
 	for i := 0; i < maxTrackedFlows; i++ {
-		b2.track("tcp", "1.2.3.4", 80, "Wi-Fi", false)
+		b2.track("tcp", "1.2.3.4", 80, "Wi-Fi", flowMeta{game: false})
 	}
-	extra := b2.track("tcp", "1.2.3.4", 81, "Wi-Fi", false)
+	extra := b2.track("tcp", "1.2.3.4", 81, "Wi-Fi", flowMeta{game: false})
 	if extra != nil {
 		t.Fatal("table full: expected nil flow")
 	}
@@ -92,7 +92,7 @@ func TestFlowLogBounds(t *testing.T) {
 
 func TestFlowLogDropsOldFinished(t *testing.T) {
 	b := newFlowBalancer()
-	f := b.track("tcp", "1.1.1.1", 443, "Wi-Fi", false)
+	f := b.track("tcp", "1.1.1.1", 443, "Wi-Fi", flowMeta{game: false})
 	b.untrack(f)
 	f.ended.Store(time.Now().Add(-closedFlowTTL - time.Minute).UnixNano())
 	if got := b.Flows(0); len(got) != 0 {

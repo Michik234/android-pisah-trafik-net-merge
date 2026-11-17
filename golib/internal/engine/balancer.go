@@ -23,6 +23,9 @@ type Balancer struct {
 	v6mode         atomic.Int32
 	split          splitHolder // see split.go
 	flows          flowTable   // see flowlog.go
+	rules          rulesHolder // see rules.go
+	resolver       atomic.Pointer[func(FlowKey) string]
+	wantProc       atomic.Bool
 }
 
 // V6Mode decides what happens to IPv6 flows entering the TUN.
@@ -134,13 +137,21 @@ func classify(err error) dialClass {
 // DialTCP connects to host:port over one NIC, failing over to the others on link-level errors.
 // On success the caller owns the returned slot and must Relay or Release it.
 func (b *Balancer) DialTCP(ctx context.Context, host string, port int) (net.Conn, *Slot, Family, error) {
+	return b.dialTCP(ctx, host, port, b.newCtx(FlowKey{DstIP: host, DstPort: port}))
+}
+
+func (b *Balancer) dialTCP(ctx context.Context, host string, port int, fc *flowCtx) (net.Conn, *Slot, Family, error) {
 	// The destination's family decides which NIC address is used; a host name stays IPv4.
 	f, network := Fam4, "tcp4"
 	if ip := net.ParseIP(host); ip != nil && ip.To4() == nil {
 		f, network = Fam6, "tcp6"
 	}
 	tried := map[string]struct{}{}
-	rt := b.routeFor(false, port) // split mode: game ports may be fenced to other networks
+	rt := b.decide(fc) // rules, then split mode: the flow may be fenced to some networks or refused
+	if rt != nil && rt.deny {
+		b.untrack(b.track("tcp", host, port, blockedNetwork, fc.meta(false))) // shows up in the monitor as Blocked
+		return nil, nil, f, &dialError{rep: repRefused, err: errBlocked}
+	}
 	rep := byte(repFailure)
 	var lastErr error = errors.New("no usable network adapter")
 	if f == Fam6 {

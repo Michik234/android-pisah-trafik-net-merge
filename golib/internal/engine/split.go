@@ -2,6 +2,7 @@ package engine
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"slices"
@@ -197,7 +198,20 @@ type SplitConfig struct {
 	// flows never touch a game adapter. Without it, a group that has no working adapter borrows the
 	// other group's, so the internet (and the game) keep working when Wi-Fi or the modem drops.
 	Strict bool `json:"strict,omitempty"`
+	// GameWifi swaps the roles: the game ports use Wi-Fi (every network that is not cellular) and
+	// everything else uses mobile data. It only matters while GameNICs is empty.
+	GameWifi bool `json:"game_wifi,omitempty"`
+	// BlockOthers rejects every flow that is not a game flow, like a REJECT rule: the network is
+	// kept for the game alone. TCP gets a refusal and UDP is dropped. DNS (port 53) is still let
+	// through unless BlockDNS is set, since a game usually has to look up its server by name.
+	BlockOthers bool `json:"block_others,omitempty"`
+	BlockDNS    bool `json:"block_dns,omitempty"`
 }
+
+// blockedNetwork is the name the flow list shows for a flow that was rejected.
+const blockedNetwork = "Blocked"
+
+var errBlocked = errors.New("blocked by split mode: only game traffic is allowed")
 
 // Active reports whether split mode changes anything: it is on and has ports to split on.
 func (c SplitConfig) Active() bool { return c.Enabled && !(c.UDP.Empty() && c.TCP.Empty()) }
@@ -205,6 +219,9 @@ func (c SplitConfig) Active() bool { return c.Enabled && !(c.UDP.Empty() && c.TC
 func (c SplitConfig) isGame(name string, cellular bool) bool {
 	if len(c.GameNICs) > 0 {
 		return containsFold(c.GameNICs, name)
+	}
+	if c.GameWifi {
+		return !cellular
 	}
 	return cellular
 }
@@ -231,6 +248,7 @@ func (c SplitConfig) Equal(o SplitConfig) bool {
 type route struct {
 	skip   map[string]struct{} // adapters this flow must not use
 	strict bool
+	deny   bool // reject the flow instead of routing it
 }
 
 type splitHolder struct{ p atomic.Pointer[SplitConfig] }
@@ -247,8 +265,13 @@ func (b *Balancer) Split() SplitConfig {
 	return SplitConfig{}
 }
 
-// routeFor decides which adapters a new flow to port may use. udp tells UDP from TCP.
+// routeFor is the split-mode decision for a flow to port, without rules. udp tells UDP from TCP.
 func (b *Balancer) routeFor(udp bool, port int) *route {
+	return b.decide(b.newCtx(FlowKey{UDP: udp, DstPort: port}))
+}
+
+// splitRoute decides which adapters a new flow to port may use under split mode.
+func (b *Balancer) splitRoute(udp bool, port int) *route {
 	c := b.split.p.Load()
 	if c == nil || !c.Active() {
 		return nil
@@ -260,6 +283,8 @@ func (b *Balancer) routeFor(udp bool, port int) *route {
 	keep := c.isOther
 	if ports.Has(port) {
 		keep = c.isGame
+	} else if c.BlockOthers && !(port == 53 && !c.BlockDNS) {
+		return &route{deny: true}
 	}
 	return &route{skip: b.S.Exclude(keep), strict: c.Strict}
 }
@@ -302,7 +327,14 @@ func (b *Balancer) SplitState() string {
 	if !c.TCP.Empty() {
 		ports = append(ports, "TCP "+c.TCP.String())
 	}
-	s := fmt.Sprintf("on: %s via %s; everything else via %s", strings.Join(ports, " + "), listOrNone(game, "no cellular adapter found"), listOrNone(other, "none"))
+	rest := "everything else via " + listOrNone(other, "none")
+	if c.BlockOthers {
+		rest = "everything else blocked"
+		if !c.BlockDNS {
+			rest += " (DNS allowed)"
+		}
+	}
+	s := fmt.Sprintf("on: %s via %s; %s", strings.Join(ports, " + "), listOrNone(game, "no matching network found"), rest)
 	if c.Strict {
 		s += " (strict)"
 	}

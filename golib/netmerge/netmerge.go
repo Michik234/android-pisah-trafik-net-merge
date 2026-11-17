@@ -172,16 +172,19 @@ func SetIPv6Mode(mode string) error {
 }
 
 // SetSplit turns split mode on or off and sets its ports. In split mode, connections to the game
-// ports leave over mobile data while everything else uses Wi-Fi, both at the same time. Ports are
+// ports leave over mobile data while everything else uses Wi-Fi, both at the same time. With
+// gameOnWifi it is the other way round: the game uses Wi-Fi and everything else mobile data.
+// With blockOthers every other connection is rejected (like REJECT in Clash) so the network serves
+// the game alone; DNS stays allowed when allowDNS is true. Ports are
 // lists like "7000-8000,3074" ("" or "none" = none, "all" = every port except 53, 123, 443, 5353).
 // udpPorts and tcpPorts are destination ports. With strict, a side never borrows the other one's
 // network when its own is down. Applies to new connections.
-func SetSplit(enabled bool, udpPorts, tcpPorts string, strict bool) error {
+func SetSplit(enabled bool, udpPorts, tcpPorts string, strict, gameOnWifi, blockOthers, allowDNS bool) error {
 	udp, tcp, err := engine.SplitPorts(udpPorts, tcpPorts)
 	if err != nil {
 		return err
 	}
-	bal.SetSplit(engine.SplitConfig{Enabled: enabled, UDP: udp, TCP: tcp, Strict: strict})
+	bal.SetSplit(engine.SplitConfig{Enabled: enabled, UDP: udp, TCP: tcp, Strict: strict, GameWifi: gameOnWifi, BlockOthers: blockOthers, BlockDNS: !allowDNS})
 	return nil
 }
 
@@ -197,6 +200,51 @@ func NormalizeSplitPorts(udpPorts, tcpPorts string) (string, error) {
 	b, _ := json.Marshal(map[string]string{"udp": udp.String(), "tcp": tcp.String()})
 	return string(b), nil
 }
+
+// ProcessResolver is implemented by the Kotlin side: it tells which app owns a connection
+// (ConnectivityManager.getConnectionOwnerUid, Android 10+). It returns the package name, several
+// joined with "|" when apps share a user id, or "" when it cannot tell.
+type ProcessResolver interface {
+	Name(udp bool, srcIP string, srcPort int, dstIP string, dstPort int) string
+}
+
+// SetProcessResolver installs the app lookup used by PROCESS-NAME rules and the live list. nil
+// removes it.
+func SetProcessResolver(r ProcessResolver) {
+	if r == nil {
+		bal.SetResolver(nil)
+		return
+	}
+	bal.SetResolver(func(k engine.FlowKey) string {
+		return r.Name(k.UDP, k.SrcIP, k.SrcPort, k.DstIP, k.DstPort)
+	})
+}
+
+// SetRules sets the Clash-style rules, one per line, for example
+//
+//	AND,((PROCESS-NAME,com.dts.freefireth),(NETWORK,udp)),MOBILE
+//	AND,((PROCESS-NAME,com.dts.freefireth),(NETWORK,tcp)),WIFI
+//
+// Actions: MOBILE, WIFI, REJECT, DIRECT. The first matching rule wins; a connection that matches
+// none follows split mode and the normal balancing. With strict, a MOBILE or WIFI rule never uses
+// the other network when its own is down. The text is checked even when enabled is false, and an
+// error says which line is wrong; nothing changes then. Applies to new connections.
+func SetRules(enabled bool, text string, strict bool) error {
+	rules, err := engine.ParseRules(text)
+	if err != nil {
+		return err
+	}
+	if !enabled || len(rules) == 0 {
+		bal.SetRules(nil)
+		return nil
+	}
+	bal.SetRules(&engine.RuleSet{Rules: rules, Strict: strict})
+	return nil
+}
+
+// SetMonitorProcesses makes the live list name the app of every connection (not only those a rule
+// asks about). The UI turns it on while the list is open.
+func SetMonitorProcesses(on bool) { bal.WantProcesses(on) }
 
 // Flows returns the live connection list as JSON: up to limit TCP connections and UDP sessions,
 // open ones first, each with its destination IP and port, the network it uses, whether it is a

@@ -39,6 +39,7 @@ class MainActivity : ComponentActivity() {
                 val even by Engine.evenSplit.collectAsState()
                 val split by Engine.split.collectAsState()
                 val flows by Engine.flows.collectAsState()
+                val rules by Engine.rules.collectAsState()
                 MainScreen(
                     phase = phase,
                     stats = stats,
@@ -48,6 +49,8 @@ class MainActivity : ComponentActivity() {
                     onEvenSplit = { Engine.setEvenSplit(this, it) },
                     split = split,
                     onSplit = { Engine.setSplit(this, it) },
+                    rules = rules,
+                    onRules = { Engine.setRules(this, it) },
                     flows = flows,
                     onMonitor = Engine::setMonitor,
                     onClearFlows = Engine::clearFlows,

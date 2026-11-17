@@ -27,6 +27,8 @@ type Flow struct {
 	port    int
 	network string // name of the network it left on
 	game    bool   // matched split mode's game ports
+	process string // the app that owns the connection, when known
+	rule    string // the rule that decided it, when one did
 	started time.Time
 
 	in, out atomic.Int64
@@ -50,15 +52,24 @@ type FlowInfo struct {
 	Network string `json:"net"`
 	Active  bool   `json:"active"`
 	Game    bool   `json:"game"`
-	In      int64  `json:"in"`  // bytes from the server
-	Out     int64  `json:"out"` // bytes to the server
+	Process string `json:"process,omitempty"` // the app, when known
+	Rule    string `json:"rule,omitempty"`    // the rule that decided it, when one did
+	In      int64  `json:"in"`                // bytes from the server
+	Out     int64  `json:"out"`               // bytes to the server
 	Started int64  `json:"started"`
 	Last    int64  `json:"last"` // unix ms of the last byte (or of the start if there was none)
 	Ended   int64  `json:"ended"`
 }
 
+// flowMeta is what the monitor shows beside a flow.
+type flowMeta struct {
+	game    bool   // matched split mode's game ports
+	process string // the app that owns the connection, when known
+	rule    string // the rule that decided it, when one did
+}
+
 // track registers a new flow. proto is "tcp" or "udp".
-func (b *Balancer) track(proto, dst string, port int, network string, game bool) *Flow {
+func (b *Balancer) track(proto, dst string, port int, network string, m flowMeta) *Flow {
 	t := &b.flows
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -69,7 +80,7 @@ func (b *Balancer) track(proto, dst string, port int, network string, game bool)
 		t.active = make(map[uint64]*Flow)
 	}
 	t.next++
-	f := &Flow{id: t.next, proto: proto, dst: dst, port: port, network: network, game: game, started: time.Now()}
+	f := &Flow{id: t.next, proto: proto, dst: dst, port: port, network: network, game: m.game, process: m.process, rule: m.rule, started: time.Now()}
 	f.last.Store(f.started.UnixNano())
 	t.active[f.id] = f
 	return f
@@ -108,7 +119,7 @@ func (f *Flow) info() FlowInfo {
 	end := f.ended.Load()
 	i := FlowInfo{
 		ID: f.id, Proto: f.proto, IP: f.dst, Port: f.port, Network: f.network,
-		Active: end == 0, Game: f.game, In: f.in.Load(), Out: f.out.Load(),
+		Active: end == 0, Game: f.game, Process: f.process, Rule: f.rule, In: f.in.Load(), Out: f.out.Load(),
 		Started: f.started.UnixMilli(), Last: f.last.Load() / 1e6,
 	}
 	if end != 0 {

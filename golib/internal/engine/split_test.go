@@ -1,7 +1,9 @@
 package engine
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"testing"
 
@@ -323,5 +325,118 @@ func TestSplitPortsLabels(t *testing.T) {
 	}
 	if u, _, _ := SplitPorts("all", ""); u.Has(443) || !u.Has(27015) {
 		t.Error("all keeps its meaning")
+	}
+}
+
+func TestSplitGameOnWifi(t *testing.T) {
+	// Reversed roles: game ports on Wi-Fi, everything else on mobile data.
+	b := newSplitBalancer(SplitConfig{Enabled: true, UDP: ports("7000-8000"), GameWifi: true})
+	for range 20 {
+		if got := pick(b, true, 7500); got == nil || got.Name != "wlan0" {
+			t.Fatalf("game UDP must use wlan0, got %v", got)
+		}
+		if got := pick(b, false, 443); got == nil || got.Name != "wwan0" {
+			t.Fatalf("web traffic must use wwan0, got %v", got)
+		}
+		if got := pick(b, true, 443); got == nil || got.Name != "wwan0" {
+			t.Fatalf("non-game UDP must use wwan0, got %v", got)
+		}
+	}
+	want := "on: UDP 7000-8000 via wlan0; everything else via wwan0"
+	if got := b.SplitState(); got != want {
+		t.Fatalf("got %q want %q", got, want)
+	}
+	// Wi-Fi down: the game borrows mobile data unless strict.
+	b.S.SetState(b.S.slots[0], Fam4, false)
+	if got := pick(b, true, 7500); got == nil || got.Name != "wwan0" {
+		t.Fatalf("game must fall back to wwan0 while wlan0 is down, got %v", got)
+	}
+	b.SetSplit(SplitConfig{Enabled: true, UDP: ports("7000-8000"), GameWifi: true, Strict: true})
+	if got := pick(b, true, 7500); got == nil || got.Name != "wlan0" {
+		t.Fatalf("strict game flow must stay on wlan0, got %v", got)
+	}
+	if got := pick(b, false, 443); got == nil || got.Name != "wwan0" {
+		t.Fatalf("strict other flow must stay on wwan0, got %v", got)
+	}
+	// An explicitly named game network still wins over the switch.
+	b.SetSplit(SplitConfig{Enabled: true, UDP: ports("7000"), GameWifi: true, GameNICs: []string{"wwan0"}})
+	if got := pick(b, true, 7000); got == nil || got.Name != "wwan0" {
+		t.Fatalf("named game network wins, got %v", got)
+	}
+	// Saved form round-trips.
+	c := SplitConfig{Enabled: true, UDP: ports("7000"), GameWifi: true}
+	j, _ := json.Marshal(c)
+	var back SplitConfig
+	if err := json.Unmarshal(j, &back); err != nil || !back.GameWifi || !back.Equal(c) {
+		t.Fatalf("round trip: %s %v", j, err)
+	}
+}
+
+func TestSplitBlockOthers(t *testing.T) {
+	b := newSplitBalancer(SplitConfig{Enabled: true, UDP: ports("7000-8000"), TCP: ports("5222"), BlockOthers: true})
+	// Game flows are routed, everything else is rejected.
+	if r := b.routeFor(true, 7500); r == nil || r.deny {
+		t.Fatalf("game UDP must be routed, got %+v", r)
+	}
+	if r := b.routeFor(false, 5222); r == nil || r.deny {
+		t.Fatalf("game TCP must be routed, got %+v", r)
+	}
+	for _, c := range []struct {
+		udp  bool
+		port int
+	}{{false, 443}, {true, 443}, {false, 80}, {true, 9999}, {false, 7500}} { // TCP on a UDP game port is not a game flow
+		if r := b.routeFor(c.udp, c.port); r == nil || !r.deny {
+			t.Fatalf("udp=%v port %d must be denied, got %+v", c.udp, c.port, r)
+		}
+	}
+	// DNS is allowed by default, over the other group.
+	for _, udp := range []bool{true, false} {
+		if r := b.routeFor(udp, 53); r == nil || r.deny {
+			t.Fatalf("DNS must be allowed, got %+v", r)
+		}
+	}
+	b.SetSplit(SplitConfig{Enabled: true, UDP: ports("7000-8000"), BlockOthers: true, BlockDNS: true})
+	if r := b.routeFor(true, 53); r == nil || !r.deny {
+		t.Fatalf("DNS must be denied when BlockDNS is set, got %+v", r)
+	}
+	// Blocking needs game ports, or one wrong tap would cut every connection.
+	b.SetSplit(SplitConfig{Enabled: true, BlockOthers: true})
+	if b.routeFor(false, 443) != nil {
+		t.Fatal("block mode without game ports must not block anything")
+	}
+	b.SetSplit(SplitConfig{Enabled: false, UDP: ports("7000"), BlockOthers: true})
+	if b.routeFor(false, 443) != nil {
+		t.Fatal("block mode while split is off must not block anything")
+	}
+}
+
+func TestSplitBlockedDialsFail(t *testing.T) {
+	b := newSplitBalancer(SplitConfig{Enabled: true, UDP: ports("7000-8000"), BlockOthers: true})
+	_, _, _, err := b.DialTCP(context.Background(), "93.184.216.34", 443)
+	var de *dialError
+	if !errors.As(err, &de) || !errors.Is(err, errBlocked) || de.rep != repRefused {
+		t.Fatalf("TCP must be refused with errBlocked, got %v", err)
+	}
+	pc, err := b.ListenUDPTo(context.Background(), Fam4, "203.0.113.9", 9999)
+	if pc != nil || !errors.Is(err, errBlocked) {
+		t.Fatalf("UDP must be refused with errBlocked, got %v %v", pc, err)
+	}
+	// Both show in the monitor as finished flows on "Blocked".
+	got := b.Flows(0)
+	if len(got) != 2 {
+		t.Fatalf("want 2 blocked rows, got %+v", got)
+	}
+	for _, f := range got {
+		if f.Network != blockedNetwork || f.Active || f.Game {
+			t.Fatalf("bad blocked row: %+v", f)
+		}
+	}
+	// Game flows are not blocked: with no usable path they fail for another reason, not errBlocked.
+	if _, err := b.ListenUDPTo(context.Background(), Fam4, "203.0.113.9", 7500); errors.Is(err, errBlocked) {
+		t.Fatal("a game flow must not be blocked")
+	}
+	want := "on: UDP 7000-8000 via wwan0; everything else blocked (DNS allowed)"
+	if got := b.SplitState(); got != want {
+		t.Fatalf("got %q want %q", got, want)
 	}
 }
